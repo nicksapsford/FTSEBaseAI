@@ -227,7 +227,8 @@ class PaperTraderFTSE:
     def open_trade(self, direction: str, price: float, session_phase: str = "") -> FTSETrade:
         """Open a new paper trade and log it."""
         from strategy_ftse import open_trade
-        self.current_trade = open_trade(direction, price, session_phase)
+        # Pass current balance for K1 compounding (USE_COMPOUNDING); ignored when fixed (paper).
+        self.current_trade = open_trade(direction, price, session_phase, balance=self.capital_gbp)
         self._save_state()
         log.info(
             "[OPEN] %s | entry=%.1f | stake=£%.4f/pt | stop=%.1f | target=%.1f",

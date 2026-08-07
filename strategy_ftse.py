@@ -6,9 +6,16 @@ P&L = points_moved * stake_per_point.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+try:   # .env-driven flags (per-machine); loaded here so module-level config sees them
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except Exception:
+    pass
 
 log = logging.getLogger("FTSETrader.Strategy")
 
@@ -17,6 +24,28 @@ log = logging.getLogger("FTSETrader.Strategy")
 TRAILING_STOP_POINTS   = 10.0    # trailing stop in index points (System 1 Review 17 Jul: 40->10; whipsaw 41.9% at 10pt vs 64.9% at 5pt, above 7.9pt median adverse move)
 TAKE_PROFIT_POINTS     = 25.0    # take-profit (System 1 Review: 200->25; evidence-based, ~90th pct move ~46pt phantom / ~23pt actual)
 MAX_RISK_PER_TRADE_GBP = 20.0    # max GBP loss per trade (2% of £1000). stake = 20/10 = £2.00/pt
+
+# Compounding position sizing (FTSEBase v1.0.3, K1 live ONLY -- .env-driven, paper-safe defaults).
+# Dell paper: USE_COMPOUNDING=False -> fixed MAX_RISK/stop stake (UNCHANGED, clean comparison).
+# K1 live .env sets USE_COMPOUNDING=True -> risk RISK_PCT of the CURRENT balance per trade (capped at
+# MAX_RISK_PCT), stake = risk / stop, rounded to £0.50 (Capital.com min), floored at MIN_STAKE.
+def _envf(name, default):
+    try: return float(os.getenv(name, str(default)))
+    except Exception: return float(default)
+USE_COMPOUNDING = os.getenv("USE_COMPOUNDING", "False").strip().lower() in ("1", "true", "yes", "on")
+RISK_PCT        = _envf("RISK_PCT", 0.02)      # 2% of current balance per trade
+MAX_RISK_PCT    = _envf("MAX_RISK_PCT", 0.05)  # hard safety cap 5%
+MIN_STAKE       = _envf("MIN_STAKE", 0.50)     # Capital.com minimum £/pt
+
+
+def calculate_compounding_stake(balance: float, stop_pts: float = TRAILING_STOP_POINTS) -> float:
+    """K1 live fixed-fractional stake (£/pt): risk RISK_PCT of the CURRENT balance (capped at
+    MAX_RISK_PCT), stake = risk / stop, rounded to nearest £0.50, floored at MIN_STAKE."""
+    if stop_pts <= 0 or balance <= 0:
+        return MIN_STAKE
+    risk_amount = min(balance * RISK_PCT, balance * MAX_RISK_PCT)
+    stake = round((risk_amount / stop_pts) * 2) / 2   # nearest £0.50
+    return max(stake, MIN_STAKE)
 IG_SPREAD_POINTS       = 3.0     # total spread in points (Capital.com demo UK100, confirmed 17 Jul: Sell 10,573.2 / Buy 10,576.2)
 IG_SPREAD_HALF         = IG_SPREAD_POINTS / 2   # half-spread applied to each fill (ask/bid)
 FORCE_CLOSE_HOUR       = 16
@@ -48,9 +77,13 @@ class FTSETrade:
     stop_pts:      float
     entry_time:    object = field(default=None)
     session_phase: str    = field(default="")
+    balance:       float  = field(default=0.0)   # current balance at entry (K1 compounding); 0 = fixed
 
     def __post_init__(self):
-        self.stake         = round(MAX_RISK_PER_TRADE_GBP / self.stop_pts, 4)
+        if USE_COMPOUNDING and self.balance and self.balance > 0:
+            self.stake     = calculate_compounding_stake(self.balance, self.stop_pts)   # K1 compounding
+        else:
+            self.stake     = round(MAX_RISK_PER_TRADE_GBP / self.stop_pts, 4)            # fixed (paper)
         self.trail_best    = self.entry_price
         if self.direction == "LONG":
             self.stop_loss   = self.entry_price - self.stop_pts
@@ -229,7 +262,7 @@ def should_force_close(ts_utc=None) -> bool:
 
 
 def open_trade(direction: str, price: float, session_phase: str = "",
-               stop_pts: float = TRAILING_STOP_POINTS) -> FTSETrade:
+               stop_pts: float = TRAILING_STOP_POINTS, balance: float = 0.0) -> FTSETrade:
     """
     Create and log a new FTSETrade.
     The mid price is converted to the real fill: LONG BUYS at the ask
@@ -244,6 +277,7 @@ def open_trade(direction: str, price: float, session_phase: str = "",
         stop_pts     = stop_pts,
         entry_time   = datetime.now(timezone.utc),
         session_phase= session_phase,
+        balance      = balance,
     )
     log.info(
         ">>> TRADE OPENED | %s | entry=%.1f (mid=%.1f) | stake=£%.4f/pt | "
