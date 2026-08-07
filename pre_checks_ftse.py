@@ -144,15 +144,20 @@ def check_cooldown(account) -> dict:
 
 def check_session_phase() -> dict:
     """
-    Only allow new entries during MORNING_PRIME or AFTERNOON.
-    LUNCH_LULL, CLOSING, PRE_OPEN, CLOSED all block new entries.
+    Only allow new entries during MORNING_PRIME. AFTERNOON is BLOCKED as of FTSEBase v1.0.2
+    (Commission 021): the 13:30-15:29 UK window ran PF 0.53 / net -£83.80 vs morning PF 2.17 --
+    morning-only lifts the system PF 1.54 -> 2.17. LUNCH_LULL, CLOSING, PRE_OPEN, CLOSED already block.
+    Exit management is unaffected -- an afternoon-OPEN trade is still managed/closed normally; this
+    gate only stops new afternoon ENTRIES.
     """
     phase = get_session_phase()
-    if phase in (MORNING_PRIME, AFTERNOON):
+    if phase == MORNING_PRIME:
         return _pass()
     messages = {
         PRE_OPEN:  "Pre-open (before 08:15 UK) -- no entries until Morning Prime",
         LUNCH_LULL:"Lunch lull (12:00-13:30 UK) -- no new entries during lunch",
+        AFTERNOON: "Afternoon (13:30-15:29 UK) -- BLOCKED (v1.0.2, Commission 021): PF 0.53 window, "
+                   "FTSEBase is morning-only.",
         CLOSING:   "Closing session (15:30-16:30 UK) -- no new entries",
         CLOSED:    "Market closed -- no entries outside trading hours",
     }
@@ -165,12 +170,16 @@ def check_daily_trend_filter(bar_1d: Optional[pd.Series], direction: str) -> dic
     Daily BULL: LONG only
     Daily BEAR: SHORT only
     Daily NEUTRAL (NaN ssl_bull): both allowed
+    FTSEBase v1.0.2 (Commission 021): missing/NaN daily -> STAY OUT (fail CLOSED), was fail-open --
+    a daily-data hiccup could let ungated trades through.
     """
     if bar_1d is None:
-        return _pass()
+        return _fail("Daily SSL data unavailable -- STAY OUT (fail-closed, v1.0.2).",
+                     block_direction="BOTH")
     ssl_1d = bar_1d.get("ssl_bull")
     if pd.isna(ssl_1d):
-        return _pass()
+        return _fail("Daily SSL is NaN -- STAY OUT (fail-closed, v1.0.2).",
+                     block_direction="BOTH")
     if ssl_1d and direction == "SHORT":
         return _fail(
             "Daily SSL is BULL -- only LONG entries allowed today. "
