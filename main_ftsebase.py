@@ -277,8 +277,13 @@ def push_dashboard(stanley, account, mode):
             floating = round(pts * trade.stake, 2)
         except Exception:
             floating = 0.0
-        lf = getattr(trade, "ladder_floor_gbp", 0.0) or 0.0
-        locked = round(lf, 2) if lf > 0 else None
+        # Locked profit = guaranteed GBP if the stop fires now (stop past entry). Base v1.0.1: derive
+        # from stop-vs-entry, NOT ladder_floor_gbp -- stop_loss is already the tightest of trail/ladder,
+        # so this reports the TRUE locked amount (the old field under-reported when the trail locked more
+        # than the ladder floor). Mirrors GoldBase v1.0.4.
+        locked_pts = (trade.stop_loss - trade.entry_price) if trade.direction == "LONG" \
+                     else (trade.entry_price - trade.stop_loss)
+        locked = round(locked_pts * trade.stake, 2) if locked_pts > 0 else None
         pos = {"direction": trade.direction, "entry": round(trade.entry_price, 1),
                "stop": round(trade.stop_loss, 1), "target": round(trade.take_profit, 1),
                "stake": round(trade.stake, 2), "floating_gbp": floating,
