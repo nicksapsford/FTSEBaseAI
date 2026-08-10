@@ -276,8 +276,19 @@ class PaperTraderFTSE:
         # ── STAGE B: a trade ONLY opens on a confirmed REAL demo order (UK100 size = £/pt stake).
         # If the connector is missing/unreachable we STAY FLAT (never silently fall back to paper). ──
         if LIVE_EXECUTION:
-            if self.ig is None or not getattr(self.ig, "connected", False):
-                log.error("[OPEN ABORTED] LIVE_EXECUTION on but Capital.com connector unavailable -- staying FLAT.")
+            if self.ig is None:
+                log.error("[OPEN ABORTED] LIVE_EXECUTION on but no Capital.com connector -- staying FLAT.")
+                self.current_trade = None
+                self._bal_at_open = None
+                self._clear_state()
+                return None
+            if not getattr(self.ig, "connected", False):
+                try:
+                    self.ig.connect()      # self-heal a failed startup connect (engine may be on yfinance fallback)
+                except Exception:
+                    pass
+            if not getattr(self.ig, "connected", False):
+                log.error("[OPEN ABORTED] Capital.com unreachable -- staying FLAT (no auto-retry).")
                 self.current_trade = None
                 self._bal_at_open = None
                 self._clear_state()
