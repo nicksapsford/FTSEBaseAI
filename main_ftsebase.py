@@ -36,9 +36,10 @@ from data_feed_ftse import FTSEDataFeed, FTSE_EPIC, is_market_open, get_session_
 from capitalcom_connector import CapitalComConnector
 from notifier_ftse import (
     notify_system_startup, notify_trade_opened,
-    notify_trade_closed_win, notify_trade_closed_loss,
+    notify_trade_closed_win, notify_trade_closed_loss, notify_system_error,
 )
-from paper_trader_ftse import PaperTraderFTSE, TRADES_LOG
+from paper_trader_ftse import PaperTraderFTSE, TRADES_LOG, LIVE_EXECUTION as _LIVE_EXECUTION
+import live_executor
 from pre_checks_ftse import run_all_pre_checks, run_individual_pre_checks, check_kill_switch_reset
 from strategy_ftse import should_force_close
 import direction_switch
@@ -175,6 +176,14 @@ _last = {"price": None, "signal": None, "lancelot": "awaiting first tick", "sess
 
 def _open(stanley, direction, price, phase):
     trade = stanley.open_trade(direction, price, phase)
+    if trade is None:
+        # STAGE B: the real demo order was refused/failed -> stay FLAT, alert, do NOT retry.
+        try:
+            notify_system_error("FTSEBase: demo order placement FAILED -- staying flat (no auto-retry).")
+        except Exception:
+            pass
+        log.error("OPEN FAILED: real demo order not placed -- remaining FLAT.")
+        return
     try:
         notify_trade_opened(direction, price, trade.stop_loss, trade.take_profit,
                             trade.stake, phase)
@@ -303,6 +312,11 @@ def push_dashboard(stanley, account, mode, ig=None):
             floating = round(pts * trade.stake, 2)
         except Exception:
             floating = 0.0
+        # STAGE B: show the REAL floating P&L from Capital.com (matches the account incl. spread) when live.
+        if _LIVE_EXECUTION and ig is not None:
+            _live_float = live_executor.position_pnl(ig, FTSE_EPIC)
+            if _live_float is not None:
+                floating = _live_float
         # Locked profit = guaranteed GBP if the stop fires now (stop past entry). Base v1.0.1: derive
         # from stop-vs-entry, NOT ladder_floor_gbp -- stop_loss is already the tightest of trail/ladder,
         # so this reports the TRUE locked amount (the old field under-reported when the trail locked more
@@ -359,6 +373,15 @@ def main() -> None:
         log.warning("Initial data load partial: %s", exc)
 
     stanley = PaperTraderFTSE()
+    # ── STAGE B: attach the connector so Stanley can place/close REAL demo orders, then reconcile any
+    # restored open position against Capital.com (so a restart never leaves us managing a phantom). ──
+    stanley.ig = ig if ig_connected else None
+    stanley.reconcile_live_position()
+    if _LIVE_EXECUTION:
+        log.warning("*** STAGE B LIVE EXECUTION ON -- REAL demo orders will be placed on the "
+                    "Capital.com %s account. ***", (ig.account_type if ig_connected else "?"))
+    else:
+        log.info("Stage B live execution OFF (LIVE_EXECUTION=False) -- paper simulation only.")
     account = AccountState(capital=stanley.capital_gbp)
     # Today P&L Persist Fix (30 Jul 2026): seed the in-memory daily tally from today's
     # closed trades in the log so a mid-day restart keeps the 'today' figure (pushed to
