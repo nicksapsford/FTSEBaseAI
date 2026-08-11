@@ -15,7 +15,7 @@ from typing import Optional
 import pandas as pd
 
 from strategy_ftse import FTSETrade, TRAILING_STOP_POINTS
-from live_executor import place_order, close_order, existing_position
+from live_executor import place_order, close_order, existing_position, sync_stop
 
 log = logging.getLogger("FTSETrader.Stanley")
 
@@ -370,6 +370,13 @@ class PaperTraderFTSE:
             moved = True
         if moved:
             self._save_state()
+            # STAGE B: mirror the tightened stop to Capital.com so the BROKER guarantees the locked
+            # profit even if the engine dies (fail-safe -- the engine still enforces it via close_order).
+            if LIVE_EXECUTION and self.ig is not None and getattr(self.current_trade, "deal_id", None):
+                try:
+                    sync_stop(self.ig, LIVE_EPIC, self.current_trade.stop_loss)
+                except Exception:
+                    pass
         reason = self.current_trade.check_exit(price)
         if reason:
             self.close_trade(price, reason)
